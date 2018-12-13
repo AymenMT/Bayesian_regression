@@ -1,0 +1,1219 @@
+---
+title: "ModÃ¨le linÃ©aire Bayesian"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r include=FALSE}
+library(mvtnorm)
+library(coda)
+```
+
+
+Le but du TP est d'implémenter les méthodes de bayésien variationnel et d'échantillonnage par chaîne de Markov (Metropolis-Hastings et Gibbs) sur l'exemple du modèle linéaire, en utilisant à la fois des données simulées et des données réelles.
+
+# <font color='color'> 2  Approximation variationnelle </font> 
+
+On considère une approximation variationnelle de $p(\theta, \alpha, \beta |y)$ par une loi produit de type $q(\theta, \alpha, \beta) = q_1(\theta)q_2(\alpha)q_3(\beta)$. On montre que les solutions de champs moyen $q_1^*, q_2^*, q_3^*$ vérifient : 
+
+* $q_1^*(\theta) \sim \mathcal{N}(\theta; \tilde{m_n},\,\tilde{S_n})\,$
+
+* $q_2^*(\alpha) \sim \mathcal{Gamma}(\alpha; a_n,\,\lambda_n)\,$
+
+* $q_3^*(\beta) \sim \mathcal{Gamma}(\beta; b_n,\,\tau_n)\,$
+
+Avec $\tilde{m_n},\tilde{S_n}, a_n, \lambda_n, b_n,\tau_n$ donnés par les équations de mise à jours (3) dans l'énoncé.
+
+
+### <font color='color'> Question 2.1 : Expression de $q_3^*(\beta)$: </font> 
+
+En utilisant l'expression du champs moyen, nous avons : 
+
+\begin{align}
+log(q_3^*(\beta)) &= cst + \mathrm{E}_{\theta, \alpha}[log p(y, \theta, \alpha, \beta)]\\
+                  &= cst + \mathrm{E}_{\theta, \alpha}[log p(y| \theta, \alpha) + log p(\theta| \alpha) + log p(\alpha) + log p(\beta)]\\
+                  &= cst + \mathrm{E}_{\theta, \alpha}[log p(y| \theta, \alpha) + log p(\beta)] \quad en \quad gardant \quad que \quad les  \quad termes \quad en \quad \beta 
+\end{align}
+
+Or, 
+
+* $\mathrm{E}_{\theta, \alpha}[log p(y| \theta, \alpha)] = \mathrm{E}_{\theta, \alpha}[log \mathcal{N}(y; \Phi \theta, \beta^{-1} I_n\,)] = \frac{n}{2} log(\beta) - \frac{1}{2}\beta \mathrm{E}_{\theta}[||y - \Phi \theta||^2] + cst$
+
+* $\mathrm{E}_{\theta, \alpha}[log p(\beta)] = \mathrm{E}_{\theta, \alpha}[log( \mathcal{Gamma}(\beta; b_0,\,\tau_0)\,)] = (b_0 - 1) log(\beta) - \tau_0 \beta + cst$
+
+On aura donc : 
+
+\begin{align}
+log(q_3^*(\beta)) &= \frac{n}{2} log(\beta) - \frac{1}{2}\beta \mathrm{E}_{\theta}[||y - \Phi \theta||^2] + (b_0 - 1) log(\beta) - \tau_0 \beta + cst \\
+                  &= (b_0 + \frac{n}{2} - 1)log(\beta) - [\frac{1}{2} \mathrm{E}_{\theta}[||y - \Phi \theta||^2] + \tau_0]\beta + cst
+\end{align}
+
+
+On reconnait ainsi l'expression d'une loi $\mathcal{Gamma}$ à constante près : 
+
+* $q_3^*(\beta) \sim \mathcal{Gamma}(\beta; b_n,\,\tau_n)\,$, avec : 
+
+* $b_n = b_0 + \frac{n}{2}$
+
+* $\tau_n = \frac{1}{2} \mathrm{E}_{\theta}[||y - \Phi \theta||^2] + \tau_0 = \frac{1}{2} \mathrm{E}_{q_1^*}[||y - \Phi \theta||^2] + \tau_0$
+
+
+### <font color='color'> Question 2.2 : Algorithme d'approximation variationnelle: </font> 
+
+L'algorithme d'approximation variationnelle nécessite :
+
+1. Le calcule de la borne inférieure de la log-évidence du modèle : 
+
+```{r}
+variational_lowerbound <- function(Phi, target, varpar , hyperpar)
+    ## ARGUMENTS: 
+    ## Phi: design matrix (feature map applied to data): a n*p matrix
+    ## target: a  vector of size n: the observed values y.
+    ## varpar: a list of variational parameters containing the following entries: 
+    ##     m_n: variational expectancy of theta
+    ##     S_n: variational covariance of theta
+    ##     a_n, lambda_n: variational gamma parameters  for alpha (prior concentration of theta)
+    ##     b_n, tau_n: variational gamma parameters for beta (prior concentration of noise)
+    ## hyperpar: a list of hyperparameters containing the following entries: 
+    ##     a_0, lambda_0 b_0  tau_0:   hyper-prior gamma parameters respectively for alpha and beta
+    ## 
+    ## RETURNS: the variational lower bound 
+{
+    list2env(varpar, envir=environment())
+    list2env(hyperpar, envir = environment() )
+    
+    n <- length(target)
+    p <- ncol(Phi)
+    
+    Elnp_y <- n/2 *(- log(2*pi) + digamma( b_n) - log(tau_n)) -
+        b_n/(2*tau_n) * (sum( (target - Phi%*%m_n)^2 ) + sum(diag( Phi%*%S_n%*%t(Phi))))
+
+    Elnp_theta <- p/2 * (- log(2*pi) + digamma( a_n) - log(lambda_n)) -
+        a_n/(2* lambda_n) * ( sum(m_n^2) + sum(diag( S_n))  )
+
+    Elnp_alpha <- a_0 * log(lambda_0) + (a_0 - 1) * (digamma( a_n) - log(lambda_n)) -
+        lambda_0 * (a_n / lambda_n) - lgamma(a_0)
+
+    
+    Elnp_beta <- b_0 * log(tau_0) + (b_0 - 1) * (digamma( b_n) - log(tau_n)) -
+        tau_0 * (b_n / tau_n) - lgamma(b_0)
+
+    Elnq_theta <- - p/2 * (1 + log(2*pi)) - 1/2 * log(det( S_n))
+    Elnq_alpha <- - lgamma(a_n) + (a_n - 1) * digamma( a_n ) + log(lambda_n) - a_n
+    Elnq_beta <- - lgamma(b_n) + (b_n - 1) * digamma( b_n ) + log(tau_n) - b_n
+
+    lowerbound <- Elnp_y + Elnp_theta + Elnp_alpha +  Elnp_beta - Elnq_theta - Elnq_alpha - Elnq_beta
+
+    return(lowerbound)
+    
+}
+```
+
+
+2. La mise à jour des paramètres :
+
+```{r}
+variational_update <- function(Phi, target,
+                               currentpar, hyperpar)
+    ## Phi: design matrix (feature map applied to data): a n*p matrix
+    ## target: a  vector of size n: the observed values y.
+    ## varpar: a list of variational parameters containing the following entries: 
+    ##     m_n: variational expectancy of theta
+    ##     S_n: variational covariance of theta
+    ##     a_n, lambda_n: variational gamma parameters  for alpha (prior concentration of theta)
+    ##     b_n, tau_n; variational gamma parameters for beta (prior concentration of noise)
+    ## hyperpar: a list of hyperparameters containing the following entries: 
+    ##     a_0, lambda_0 b_0  tau_0:   hyper-prior gamma parameters respectively for alpha and beta
+    ## 
+    ## RETURNS: a list of the same format as varpar containing the updated parameters. 
+{
+    list2env(currentpar, envir=environment())
+    list2env(hyperpar, envir = environment() )
+    n <- length(target)
+    p <- ncol(Phi)
+    
+    S_n_inv <- a_n/lambda_n * diag(p) + b_n/tau_n * t(Phi)%*%Phi
+    S_n <-  solve(S_n_inv)
+    m_n <-  b_n / tau_n * S_n %*% t(Phi) %*% target
+    a_n <- a_0 + p/2
+    lambda_n <- lambda_0 + 1/2 * (sum(m_n^2) + sum(diag(S_n)) )
+    b_n <- b_0 + n/2
+    tau_n <- tau_0 + 1/2 * ( sum( ( target - Phi %*% m_n)^2 ) + sum(diag(Phi %*% S_n%*% t(Phi)))  )
+    return(list(m_n = m_n, S_n = S_n, a_n = a_n, lambda_n = lambda_n, b_n = b_n, tau_n = tau_n))
+                
+}
+
+```
+
+
+3. L'algorithme qui assure la mise à jour successive des équations variationnelles :
+
+```{r}
+variational_lm <- function(Phi, target,  hyperpar,  maxiter = 100, tol = 1e-4)
+    ## ARGUMENTS: 
+    ## Phi: design matrix (feature map applied to data): a n*p matrix
+    ## target: a  vector of size n: the observed values y.
+    ## hyperpar: a list of hyperparameters containing entries a_0, lambda_0, b_0, tau_0:
+    ##          hyper-prior gamma parameters respectively for alpha and beta
+    ## maxiter: the maximum number of variational updates
+    ## tol: the stopping vriterion for the variational updates: the algorithm stops if the
+    ##     standard deviation of the variational lower bound  over the latest 5 iterations
+    ## is less than tol. 
+    ##
+    ## RETURNS:  a list with entries (convergence, var_par, lowerbound, niter)
+    ##     convergence = 0 if the stopping criterion was met (successful convergence), 1 otherwise. 
+    ##     var_par: a list containing the variational parameters at the last iteration, that is
+    ##           (m_n, S_n, a_n, lambda_n, b_n, tau_n)
+    ##     lowerbound: the lower bound values across all iterations of the optimisation algorithm. 
+    ##     niter: the number of iterations performed. 
+{
+    n <- length(target)
+    p <- ncol(Phi)
+    list2env(hyperpar, envir=environment())
+    ## list2env makes all elements of the list visible from the function's environment.
+
+    ## Initialization 
+    niter <- 0 ## number of iterations performed  
+    currentpar <- list(m_n =  matrix(rep(0,5)) ,
+                       S_n = matrix(0, 5, 5) , 
+                       a_n =  as.numeric(hyperpar[1]) , 
+                       lambda_n = as.numeric(hyperpar[2]) ,
+                       b_n =  as.numeric(hyperpar[3]) , 
+                       tau_n = as.numeric(hyperpar[4]))
+
+    lowerbound <- c() ## empty vector. 
+    delta <- tol+1  ## stopping criterion not satisfied at the initialization step
+    continue <- TRUE  
+    while(continue)
+    {
+      currentpar <- variational_update(Phi, target, currentpar, hyperpar)
+      l <- variational_lowerbound(Phi, target, currentpar , hyperpar)
+      lowerbound <- c(lowerbound, l)
+
+        ##  the stopping criterion is implemented below:
+        if(niter >5){
+            delta <- sd(lowerbound[niter:(niter-5) ]) 
+            if(delta <tol){ continue <- FALSE}
+        }
+        if(niter > maxiter){ continue <- FALSE}
+      niter = niter + 1
+    }
+    if (delta < tol ){ cv <- 0} else{cv <- 1}
+    return(list( convergence = cv , varpar = currentpar, lowerbound = lowerbound, niter = niter  ))
+}
+```
+
+
+### <font color='color'> Question 2.3 : Test sur des données simulées </font> 
+
+Nous allons générer un jeu de données $x = (x_1,.., x_n)$ de taille n = 100, uniformément distribué sur l'intervalle [-3,3]. 
+
+On prendra comme fonctions de base les fonctions polynomiales $\Phi_0,..,\Phi_4$ où $\Phi_i(x) = x^i$. 
+
+```{r}
+Fmap <- function(x){c(1, x,x^2,x^3, x^4)}
+```
+
+Nous générons ensuite des observations $y_i$ dans le modèle (1) avec comme vrais paramètres $\beta_0 = 0.1$ et $\theta_0 = (5, 2, 1, -1, 1)$.
+
+```{r}
+Beta0 <- 0.1
+theta0 <- c(5, 2, 1, -1, 1)
+```
+
+Nous avons donc :
+
+```{r}
+h0 <- function(x){ sum(Fmap(x)* theta0)}
+N <- 100
+set.seed(3) 
+
+
+data <- matrix(runif(N, min=-3, max = 3),ncol=1)
+target <-  sapply(data,h0) + rnorm(N, sd = sqrt(Beta0)^(-1))
+
+# plotting the  training data and the true regression function
+absc = seq(-3, 3, length.out = N)
+targetline = sapply(absc, h0)
+plot(absc, targetline, type='l', lwd=2, ##xaxt='n', yaxt='n',
+     xlab = "x", ylab="y", cex.lab=1.8, ylim= range(targetline, target))
+points(data, target, pch=19, col='red')
+
+```
+
+
+#### <font color='color'> $\theta$ réelle Vs Espérance a posteriori </font> 
+
+Par la suite, nous appliquons l'algorithme et on trace sur un même graphique le vrai vecteur $\theta_0$ en noir, l'espérance a posteriori de chaque élément de $\theta$ dans l'approximation variationnelle en rouge et leurs intervalles de crédibilité a posteriori à 95%:
+
+```{r}
+hyperpar <- list(a_0 = 0.1, lambda_0 = 0.1,
+                 b_0 = 0.1, tau_0 = 0.1)
+Phi <-  t(apply(X= data, MARGIN=1, FUN = Fmap))
+res = variational_lm(Phi, target,  hyperpar,  maxiter = 100, tol = 1e-4)
+```
+
+```{r}
+Iplus <- res$varpar$`m_n` + 1.96*sqrt(diag(res$varpar$S_n))
+Iminus <- res$varpar$`m_n` - + 1.96*sqrt(diag(res$varpar$S_n))
+
+plot(1:5, theta0, pch=19,col='black', ylim = range(Iminus, Iplus, theta0),  ylab = 'Theta', main = 'Theta réelle Vs Espérance a posteriori')
+points(res$varpar$`m_n`, col='red')
+arrows( x0 = 1:5, y0 = Iminus, 
+        y1 = Iplus ,code=3, length=0.1, col="red")
+```
+
+On remarque que l'espérance a posteriori de chaque élément de $\theta$ est proche de la valeur réelle. 
+
+#### <font color='color'> $\beta$  réelle Vs espérance a posteriori de $\beta$ sous $q^*$ </font> 
+
+Ensuite, nous allons comparer l'espérance a posteriori de $\beta$ sous $q^*$ et sa valeur réelle, tout en tenant compte d'un intervalle de crédibilité a posteriori. 
+
+* Nous avons : $\mathrm{E}_{q^*}[\beta] = \mathrm{E}_{q_3^*}[\beta] = \frac{b_n}{\tau_n}$
+
+```{r}
+esp_beta = res$varpar$b_n / res$varpar$tau_n 
+esp_beta
+```
+
+* Intervalle de crédibilité : 
+
+```{r}
+b_sup = qgamma(p=0.975, shape = res$varpar$b_n, rate = res$varpar$tau_n)
+b_inf = qgamma(p=0.025, shape = res$varpar$b_n, rate = res$varpar$tau_n)
+
+plot(Beta0, pch=19,col='black', ylim = range(b_inf-0.1, b_sup+0.1, Beta0),  ylab = 'Beta', main = 'Beta réelle Vs Beta estimée')
+points(1, esp_beta, col='red')
+arrows( x0 = 1, y0 = b_inf, 
+        y1 = b_sup ,code=3, length=0.1, col="red")
+
+```
+
+
+* Interprétation : 
+
+On remarque que la valeur réelle de $\beta$ est proche de la valeur estimée, et est située dans l'intervalle de crédibilité à 95%.
+
+
+#### <font color='color'> méthode variationnelle Vs empirical Bayes </font> 
+
+Finalement, nous allons comparer les résultats de la méthode variationnelle avec ceux de la méthode 'empirical Bayes', correspondant à l'optimisation jointe de la log-évidence du modèle vue comme une fonction de $\alpha$ et $\beta$.
+
+Pour ce faire, nous définissons le fonction du calcul de la log-évidence du modèle : 
+
+```{r}
+logevidence <- function(Alpha, Beta, data ,feature_map, target)
+    ## ARGUMENTS: 
+    ## Alpha: prior precision for theta
+    ## Beta: noise precision
+    ## data: the input points x_{1:n}
+    ## feature_map: the vector of basis functions
+    ## target: the observed values y: a vector of size n.
+    ## RETURNS: the logarithm of the model evidence forthe considered dataset. 
+{
+    Phi_transpose <-  apply(X= data, MARGIN=1, FUN = feature_map)
+    if(is.vector(Phi_transpose)){
+        Phi_transpose = matrix(Phi_transpose,nrow=1)
+    }
+    Phi <- t(Phi_transpose)
+    N <- nrow(Phi)
+    p <- ncol(Phi)
+    A <- Alpha*diag(p) + Beta * Phi_transpose %*% Phi
+    postmean <- Beta * solve(A) %*% Phi_transpose %*% target
+    energy <- Beta/2 * sum(( target - Phi%*%postmean)^2) + Alpha/2 * sum((postmean)^2)
+    res <- p/2 * log(Alpha) + N/2 * log(Beta) - energy - 1/2 * log(det(A)) - N/2 * log(2*pi)
+    return(res)    
+}
+```
+
+
+
+En fixant la dimension du modèle, nous cherchons $\alpha^*$ et $\beta^*$ qui maximisent la log-évidence du modèle : 
+
+```{r}
+optAB <- optim(par=c(1, 1), fn=function(par){-logevidence(Alpha=par[1], Beta=par[2], data ,feature_map=Fmap, target)},method = "L-BFGS-B", lower=c(0.1 , 0.1), upper = c(250,30))
+optAB$`par`
+```
+
+Nous avons donc $\alpha^* = 0.1690487$ et $\beta^* = 0.1155917$ 
+
+Or, dans l'approximation variationnelle, nous avons : 
+
+* $\mathrm{E}_{q^*}[\beta] = \mathrm{E}_{q_3^*}[\beta] = \frac{b_n}{\tau_n}$
+
+* $\mathrm{E}_{q^*}[\alpha] = \mathrm{E}_{q_2^*}[\alpha] = \frac{a_n}{\lambda_n}$
+
+
+```{r}
+esp_beta = res$varpar$b_n / res$varpar$tau_n 
+esp_alpha = res$varpar$a_n / res$varpar$lambda_n 
+
+esp_beta
+esp_alpha
+```
+
+Donc : 
+
+* $\mathrm{E}_{q^*}[\alpha] = 0.1751109 \quad \alpha^* = 0.1690487$
+* $\mathrm{E}_{q^*}[\beta] = 0.1157912 \quad \beta^* = 0.1155917$
+
+On remarque que les valeurs estimées sont proches en utilisant les deux méthodes.
+
+
+#### <font color='color'> $\theta$  méthode variationnelle Vs $\theta$  modèle bayésien non-hiérarchique </font> 
+
+On compare aussi les estimation de $\theta$ par la méthode variationnelle avec celles du modèle bayésien non-hiérarchique (en prenant $\alpha = \alpha^*$ et $\beta = \beta^*$ ).
+
+On définit donc la fonction glinear_fit qui calcule la moyenne et la variance a posteriori suivant le modèle bayésien non-hiérarchique : 
+
+```{r}
+glinear_fit <- function(Alpha, Beta, data, feature_map, target)
+    #' ARGUMENTS: 
+    #' Alpha: prior precision on theta
+    #' Beta: noise precision
+    #' data: the input variables (x): a matrix with n rows where n is the sample size
+    #'feature_map: the basis function, returning a vector of  size p equal to the dimension of theta
+    #' target: the observed values y: a vector of size n
+    #' RETURNS: a  list with entries (mean, cov) (osterior mean and variance)
+{
+    
+    Phi <-  t(apply(X= data, MARGIN=1, FUN = feature_map))
+    p = ncol(Phi)
+    posterior_variance_inverse <-  diag(x=Alpha, nrow= p) +
+        Beta * t(Phi)%*%Phi
+    posterior_variance <-  solve(posterior_variance_inverse)
+    posterior_mean <-   Beta *
+        posterior_variance %*% t(Phi)%*% target
+    return(list(mean=posterior_mean, cov=posterior_variance))
+}
+```
+
+On lance les calcules :
+
+```{r}
+mfit <- glinear_fit(Alpha = optAB$`par`[1], Beta = optAB$`par`[2],
+                    data= data, feature_map = Fmap, target = target)
+```
+
+Et on trace sur le même graphique le vrai vecteur $\theta_0$ en noir, l'espérance a posteriori de chaque élément de $\theta$ dans l'approximation variationnelle en rouge, l'estimation par le modèle bayésien non-hiérarchique en vert ainsi que leurs intervalles de crédibilité a posteriori à 95%:
+
+```{r}
+plot(1:5, theta0, pch=19,col='black', ylim = range(Iminus, Iplus, theta0),  ylab = 'Theta', main = 'Approximation variationnelle VS modèle bayésien non-hiérarchique')
+points(res$varpar$`m_n`, col='red')
+arrows( x0 = 1:5, y0 = Iminus, 
+        y1 = Iplus ,code=3, length=0.1, col="red")
+Iplus2 <- mfit$mean + 1.96*sqrt(diag(mfit$cov))
+Iminus2 <- mfit$mean - + 1.96*sqrt(diag(mfit$cov))
+
+points(mfit$mean, col='green')
+arrows( x0 = 1:5, y0 = Iminus2, 
+        y1 = Iplus2 ,code=3, length=0.1, col="green")
+```
+
+
+**On remarque que les approximations sont presque confondues.**
+
+### <font color='color'> Question 2.4 : Choix du modèle </font> 
+
+Dans cette partie, on considère le problème de prédiction de la distance d'arrêt en fonction de la vitesse du véhicule. 
+
+```{r}
+data(cars)
+names(cars)
+```
+
+
+On adopte un modèle de régression linéaire sur une base de fonctions polynomiales. Dans cette question on cherche à déterminer le degré maximal de la base polynomiale à utiliser (c'est-à-dire, on cherche à choisir une dimension adaptée p pour ce jeu de données).
+
+Nous allons donc tester plusieurs modèles : 
+
+```{r}
+F8 <- function(x){c(1, x, x^2, x^3, x^4, x^5, x^6, x^7, x^8)}
+F7 <- function(x){c(1, x, x^2, x^3, x^4, x^5, x^6, x^7)}
+F6 <- function(x){c(1, x, x^2, x^3, x^4, x^5, x^6)}
+F5 <- function(x){c(1, x, x^2, x^3, x^4, x^5)}
+F4 <- function(x){c(1, x, x^2, x^3, x^4)}
+F3 <- function(x){c(1, x, x^2, x^3)}
+F2 <- function(x){c(1, x, x^2)}
+F1 <- function(x){c(1, x)}
+F0 <- function(x){1}
+listF=list(F0,F1,F2,F3,F4,F5,F6,F7,F8)
+```
+
+
+et on prendra celui qui maximise la log-évidence du modèle, et donc la borne inf de la log-évidence. :
+
+```{r message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+l_q <- sapply(1:8,FUN=function(i){
+  try(tail(variational_lm(t(apply(X= as.matrix(cars$speed), MARGIN=1, FUN = listF[[i+1]])), cars$dist,  hyperpar,  maxiter = 100, tol = 1e-4)$lowerbound, n=1))})
+
+#Pour F0
+l = tail(variational_lm(t(t(apply(X= as.matrix(cars$speed), MARGIN=1, FUN = listF[[1]]))), cars$dist,  hyperpar,  maxiter = 100, tol = 1e-4)$lowerbound, n=1)
+l_q = c(l, l_q)
+
+```
+
+On représente sur un graphe la borne inf de la log-évidence en fonction du modèle : 
+
+```{r warning=FALSE}
+plot(0:8, l_q)
+```
+
+
+```{r warning=FALSE}
+which.max(l_q)
+```
+
+On remarque que le troisième modèle (F2) maximise la borne inf. C'est le modèle à retenir.
+
+
+### <font color='color'> Question 2.5 : Prédictive approchée dans l'approximation variationnelle </font> 
+
+Dans cette question on utilisera le modèle déterminé à la question précédente pour le jeu de données cars.
+
+En principe la loi prédictive est la loi d'une nouvelle observation $Y_{new}$ associée à un nouvelle abscisse $x_{new}$ suivant le modèle linéaire, 
+$Y_{new} = < h(x),\theta> + \epsilon$ avec $\epsilon \sim \mathcal{N}(0, \beta^{-1})$ et $(\theta, \beta)$ distribués selon la loi a posteriori. 
+
+
+Ici on utilise l'approximation variationnelle de la loi a posteriori et on remplace la composante $q_3^*$ par un Dirac au point $\mathrm{E}_{q_3^*}[\beta]$.
+
+#### <font color='color'> Choix de $q_3^*$ </font> 
+
+On remarque que la variance de la loi gamma $q_3$ est très faible : 
+
+```{r}
+Fmap <- F2
+Phi <-  t(apply(X= as.matrix(cars$speed,nrow = 1, ncol = 50), MARGIN=1, FUN = Fmap))
+res = variational_lm(Phi, as.numeric(cars$dist),  hyperpar,  maxiter = 100, tol = 1e-4)
+
+(res$varpar$b_n / res$varpar$tau_n)^2
+```
+
+On peut donc assimiler $q_3$ à un Dirac centré sur son moyenne.
+
+#### <font color='color'> Loi prédictive a posteriori </font> 
+\begin{align}
+p(y_{new} | y_{1:n}, x_{new}) &= \int_{\theta} \int_{\alpha} \int_{\beta} p(y_{new} | x_{new}, \alpha, \beta, \theta) p(\alpha, \beta, \theta | y_{1:n} ) \, \mathrm d\theta d\beta d\alpha \\
+                              &\simeq \int_{\theta} \int_{\alpha} \int_{\beta} p(y_{new} | x_{new}, \alpha, \beta, \theta) q_1^*(\theta) q_2^*(\alpha) q_3^*(\beta) \, \mathrm d\theta d\beta d\alpha \\
+                              &\simeq \int_{\theta} \int_{\alpha} p(y_{new} | x_{new}, \alpha, \mathrm{E}_{q_3^*}[\beta] , \theta) q_1^*(\theta) q_2^*(\alpha) \, \mathrm d\theta  d\alpha \\
+                              &\simeq \int_{\theta}  \mathcal{N}(y_{new}; \Phi \theta,\,(\frac{b_n}{\tau_n})^{-1}I_n)\, \mathcal{N}(\theta; \tilde{m_n},\,\tilde{S_n})\, \mathrm d\theta  \int_{\alpha} q_2^*(\alpha) \, \mathrm d\alpha \\
+                              &\simeq \int_{\theta}  \mathcal{N}(y_{new}; \Phi(x_{new}) \theta,\,(\frac{b_n}{\tau_n})^{-1}I_n)\, \mathcal{N}(\theta; \tilde{m_n},\,\tilde{S_n})\, \mathrm d\theta\\
+                              &\simeq \mathcal{N}(y_{new}; \Phi(x_{new}) \tilde{m_n},\,\sigma^2(x_{new}))\,
+\end{align}
+
+Avec $\sigma^2(x_{new}) = (\frac{b_n}{\tau_n})^{-1} + \Phi(x_{new})^T\tilde{S_n}\Phi(x_{new})$
+
+
+En effet, on peut vérifier que si on a :
+
+* $p(x) = \mathcal{N}(x; \mu,\, \Lambda^{-1})$
+* $p(y|x) = \mathcal{N}(y; Ax + b,\, L^{-1})$
+
+Alors $p(y) = \mathcal{N}(y; A\mu + b,\, L^{-1} + A\Lambda^{-1}A^T)$
+
+
+Donc, l'espérance de la loi prédictive a posteriori $\mathrm{E}[y_{new} | y_{1:n}] = \Phi(x_{new}) \tilde{m_n}$ 
+
+#### <font color='color'> Graph : </font>
+
+Pour tracer l'espérance de la loi prédictive a posteriori en fonction de $x_{new}$ variant dans [0,25], nous utilisons tous d'abord le modèle choisie pour calculer $\tilde{m_n}$ : 
+
+```{r}
+Fmap <- F2
+Phi <-  t(apply(X= as.matrix(cars$speed,nrow = 1, ncol = 50), MARGIN=1, FUN = Fmap))
+res = variational_lm(Phi, as.numeric(cars$dist),  hyperpar,  maxiter = 100, tol = 1e-4)
+
+```
+
+
+```{r}
+x_new = c(1:25)
+Phi_new <-  apply(X= as.matrix(x_new), MARGIN=1, FUN = Fmap)
+esp_y = as.numeric(t(res$varpar$m_n) %*% Phi_new)
+```
+
+```{r}
+var_new = 1/(res$varpar$b_n / res$varpar$tau_n) + t(Phi_new)%*%res$varpar$S_n%*%Phi_new
+```
+
+
+```{r}
+plot(x_new, esp_y, col='green')
+points(x = cars$speed, y=cars$dist)
+
+
+yplus = as.numeric(esp_y) + 1.96*sqrt(diag(var_new))
+yminus= as.numeric(esp_y) - 1.96*sqrt(diag(var_new))
+ymini = min(yminus)
+ymaxi = max(yplus)
+polygon(x = c(x_new, rev(x_new),
+              x_new[1]),
+        y = c(yplus,rev(yminus), yplus[1]), col=rgb(1, 0, 0,0.5))
+```
+
+*On remarque que le jeu de données est bien à l'intérieur de notre interval de crédibilité.*
+
+
+
+```{r warning=FALSE}
+library(mvtnorm)
+library(expm)
+
+sigma = sqrtm(var_new)
+sigma_r = matrix(0,25,25)
+for (i in 1:dim(sigma)[1]){
+  
+  for (j in 1:dim(sigma)[2]){
+    sigma_r[i,j] = as.numeric(sigma[i,j])
+  }
+}
+
+
+q1 = qmvnorm(0.025,  mean = as.numeric(esp_y), sigma = sigma_r)$quantile
+q2 = qmvnorm(0.975,  mean = as.numeric(esp_y), sigma = sigma_r)$quantile
+```
+
+```{r}
+as.numeric(esp_y) + 1.96*sqrt(diag(var_new))
+```
+
+# <font color='color'> 3  Méthodes MCMC </font>
+
+Dans cette partie on cherche à approcher la loi a posteriori $p(\theta,\alpha,\beta|y)$ par des méthodes de chaînes de Markov.
+
+
+## <font color='color'> 3.1  Algorithme de Metropolis-Hastings </font>
+
+Dans cette partie, nous allons procéder par l'estimation à l'aide de l'algorithme de Metropolis-Hastings. Pour ce faire, il est nécessaire de définir une loi de proposition. Nous posons donc la loi de proposition à l'état courant $(\theta_t, \beta_t, \alpha_t)$ par le produit $q_1(\theta_t,\theta^*) q_2(\alpha_t,\alpha^*) q_3(\beta_t,\beta^*)$ tel que :
+
+* $q_1(\theta_t,.) = \mathcal{N}(\theta_t, \sigma_{\theta}^2)$
+
+* $q_2(\alpha_t,.)$  est une loi log-Normale de paramètres $\mu = \alpha_t$, $\sigma^2= \sigma_{\alpha}^2$
+
+* $q_3(\beta_t,.)$  est une loi log-Normale de paramètres $\mu = \beta_t$, $\sigma^2= \sigma_{\beta}^2$
+
+Avant d'implémenter l'algorithme principal, nous devons tout d'abord définir :
+
+
+1. La fonction d'évaluation du log a posteriori en un point $(\theta_t, \beta_t, \alpha_t)$ :
+
+```{r}
+logposterior <- function(par){ ## logarithm of the unnormalizized posterior density
+        llkl <- sum( dnorm(target, mean = Phi%*%as.matrix(par$theta), sd = (par$beta)^(-1/2) ,
+                           log=TRUE ))
+        lprior <- sum( dnorm(par$theta, mean = 0, sd = (par$alpha)^(-1/2) ,
+                             log = TRUE )) +
+            dgamma(par$alpha, shape = hyperpar$a_0, rate = hyperpar$lambda_0, log = TRUE) +
+            dgamma(par$beta, shape = hyperpar$b_0, rate = hyperpar$tau_0, log = TRUE)
+        return(llkl + lprior)
+    }
+```
+
+
+2. La fonction de proposition à l'état courant $(\theta_t, \beta_t, \alpha_t)$ :
+
+```{r}
+proposal <- function(proposalpar, par){
+      m1 = log(par$alpha) #- 0.5*proposalpar$sd_alpha
+      m2 = log(par$beta) #- 0.5*proposalpar$sd_beta
+      theta_new <- t(rmvnorm(1,mean=par$theta,sigma=proposalpar$sd_theta^2*diag(p)))
+      alpha_new <- rlnorm(1, mean=m1, sd=proposalpar$sd_alpha)
+      beta_new <- rlnorm(1, mean=m2, sd=proposalpar$sd_beta)
+      return(list(alpha=alpha_new,beta=beta_new,theta=theta_new))
+    }
+```
+
+
+3. La fonction d'évaluation du log de la loi de proposition en un point simulé $(\theta^*, \beta^*, \alpha^*)$ :
+
+```{r}
+eval_proposal <- function(proposalpar, par, eval_par){
+      q1 <- dmvnorm(t(eval_par$theta),mean=par$theta,sigma=proposalpar$sd_theta^2*diag(p),log=TRUE)
+      
+      m1 = log(par$alpha)# - 0.5*proposalpar$sd_alpha
+      m2 = log(par$beta)# - 0.5*proposalpar$sd_beta
+      q2 <- dlnorm(eval_par$alpha, mean=m1, sd=proposalpar$sd_alpha, log=TRUE)
+      q3 <- dlnorm(eval_par$beta, mean=m2, sd=proposalpar$sd_beta, log=TRUE)
+      return(q1 + q2 + q3)
+    }
+```
+
+
+Une fois ces fonctions définies, l'algorithme propose à chaque itération des paramètres $(\theta^*, \beta^*, \alpha^*)$ qui seront acceptés ou pas sous une probabilité d'acceptation. 
+```{r}
+## implementation 
+##  Metropolis Hastings
+MH_lm <- function(Phi, target, hyperpar,
+                  proposalpar = list(sd_theta = 0.05, sd_alpha=0.01, sd_beta = 0.01),
+                  startpar = list(theta = rep(0,ncol(Phi)), alpha = 1, beta = 1),
+                  Nsim = 10e+3 )
+    ## ARGUMENTS:
+    ## Phi: design matrix (feature map applied to data): a n*p matrix
+    ## target: a  vector of size n: the observed values y.
+    ## hyperpar: a list of hyperparameters containing entries a_0, lambda_0, b_0, tau_0:
+    ##          hyper-prior gamma parameters respectively for alpha and beta
+
+    ##proposalpar : a list containing entries sd_theta, sd_alpha, sd_beta: the standard deviations respectively for the theta proposal (gaussian) and for alpha and beta on the exponential scale (alpha and beta proposal are lognormal)
+    ## startpar: the starting value for the chain: a list with entries theta, alpha, beta.
+    ## Nsim: the desired length for the markov chain (number of MCMC interations)
+    ##
+    ## RETURNS: a list with entries :
+    ## statesChain:  a matrix of dimension Nsim* (p+2): row number i  contains the current
+    ##               state at time i, which is the concatenation of the vector theta, alpha and beta
+    ## naccept: an integer: the number of accepted moves
+    ## lastpar: the latest state: a list with entries (theta, alpha, beta)
+{
+    n <- nrow(Phi)
+    p <- ncol(Phi)
+    statesChain <- matrix(nrow=Nsim, ncol = p +2 )
+    currentpar <- startpar
+    naccept <- 0
+    
+    for(i in (1:Nsim)){
+        sim = proposal(proposalpar, currentpar)
+        
+        prob = min(1, exp((logposterior(sim) + eval_proposal(proposalpar, currentpar, sim))
+                          - (logposterior(currentpar) + eval_proposal(proposalpar, sim, currentpar))))
+        rand_var = runif(1)
+        if (rand_var <= prob){
+          currentpar <- sim
+          naccept = naccept + 1
+        } else{
+          currentpar <- currentpar
+        }
+  
+        statesChain[i, ] <- c(currentpar$theta, currentpar$alpha, currentpar$beta)
+    }
+    return(list(statesChain = statesChain, naccept = naccept, lastpar = currentpar ))
+}
+```
+
+
+
+### <font color='color'> Test sur un jeu de données simulé </font>
+
+Nous simulons, comme dans la question 2.3, un jeu de données de taille n = 100
+
+```{r}
+Fmap <- function(x){c(1, x,x^2,x^3, x^4)}
+N <- 100
+Beta0 <- 0.1
+theta0 <- c(5, 2, 1, -1, 1)
+set.seed(3) 
+data <- matrix(runif(N, min=-3, max = 3),ncol=1)
+h0 <- function(x){ sum(Fmap(x)* theta0)}
+
+target <-  sapply(data,h0) + rnorm(N, sd = sqrt(Beta0)^(-1))
+hyperpar <- list(a_0 = 0.1, lambda_0 = 0.1,
+                 b_0 = 0.1, tau_0 = 0.1)
+Phi <-  t(apply(X= data, MARGIN=1, FUN = Fmap))
+```
+
+
+On applique donc l'algorithme ainsi développé ! 
+
+```{r}
+MH_fit = MH_lm(Phi, target, hyperpar, proposalpar = list(sd_theta = 0.05, sd_alpha=0.01, sd_beta = 0.01),
+      startpar = list(theta = rep(0,ncol(Phi)), alpha = 1, beta = 1), Nsim = 10e+3 )
+```
+
+
+```{r}
+MH_fit$lastpar
+
+```
+
+On remarque donc que les dernières valeurs acceptées de $\beta$ et $\theta$ ainsi obtenus sont proches des valeurs réelles.
+
+On a sauvegardé aussi le taux d'acceptation : 
+
+```{r}
+MH_fit$naccept / 10e+3 * 100
+``` 
+
+et donc le taux de rejet est de : 
+
+```{r}
+rejectionRate(mcmc(MH_fit$statesChain))
+```
+
+
+
+### <font color='color'> Allure de la chaine (3ième composante de $\theta$) </font>
+
+On visualise l'allure de la chaîne de la 5ième composante de $\theta$ au cours des itérations ainsi que la densité obtenue : 
+
+```{r}
+plot(mcmc(MH_fit$statesChain)[,5])
+```
+
+On peut voir donc l'oscillation de la variable au cours des itérations ainsi que l'aspect acceptation / rejet. Le rejet correspond aux parties constantes de la courbe. D'autre part, on peut voir que la densité obtenues est proche de la densité d'une loi normale, centré sur 1 ( la valeur réelle de $\theta_5$)
+
+
+
+### <font color='color'> Allure de la chaine de $\beta$ </font>
+
+On visualise l'allure de la chaîne de $\beta$ au cours des itérations ainsi que la densité obtenue : 
+
+```{r}
+plot(mcmc(MH_fit$statesChain)[,7])
+```
+
+Même constatations pour la trace de la variable. D'autre part, on reconnait ici la densité d'une loi log-normale, centré sur 0.1 ( la valeur réelle de $\beta$).
+
+Par contre, on remarque que l'algorithme est sensible aux valeurs initiales ainsi que l'aléa dans le tirage.
+
+
+### <font color='color'> Choix des paramètres </font>
+
+Afin de choisir les bon paramètres, on va appliquer une série de tests : 
+
+#### Test heidel.diag
+
+Ce test nous fournit deux résultats : 
+
+* Un test de convergence : On utilise la statistique de Cramer-von-Mises pour tester l'hypothèse nulle (H0 :  les valeurs échantillonnées proviennent d'une distribution stationnaire). Le test est appliqué successivement, d'abord sur l'ensemble de la chaîne, puis après avoir enlevé les 10%, 20%, ... premiers éléments de la chaîne jusqu'à ce que l'hypothèse nulle soit acceptée ou que 50% de la chaîne soit rejetée. Si le test de stationnarité constitue un «échec», cela indique qu'une exécution MCMC plus longue est nécessaire. Si le test de stationnarité est réussi, le nombre d'itérations à conserver et le nombre à éliminer sont retournés.
+
+* Le test de demi-largeur : On calcule un intervalle de confiance de 95% pour la moyenne, en utilisant la partie de la chaîne ayant réussi le test de stationnarité. La moitié de la largeur de cet intervalle est comparée à l'estimation de la moyenne. Si le rapport entre la demi-largeur et la moyenne est inférieur à $\epsilon$, le test de demi-largeur est réussi. Sinon, la longueur de l'échantillon n'est pas jugée suffisamment longue pour permettre d'estimer la moyenne avec une précision suffisante.
+
+
+```{r}
+hh <- heidel.diag(MH_fit$statesChain, pvalue = 0.05)
+hh
+```
+
+On remarque donc, avec ce paramétrage, que le test de stationnarité est réussi pour toutes les variables. Par exemple, la 3ième composante de $\theta$ admet comme une période de "burn-in" de 2000 itérations.
+
+
+On remarque aussi que, même si la 3ième composante de $\theta$ a réussi le test de stationnarité, le test du Halfwidth n'a pas été réussi. On peut dire donc que la longueur de l'échantillon n'est pas jugée suffisamment longue pour permettre d'estimer la moyenne avec une précision suffisante.
+
+
+On peut aussi tester l'approche du test de la convergence de Gelman et Rubin. Dans cette approche, on lance des chaînes parallèles qui commencent par des valeurs initiales relativement sur dispersées par rapport à la distribution ultérieure. La convergence est diagnostiquée lorsque les chaînes ont «oublié» leurs valeurs initiales et que le résultat de toutes les chaînes est indiscernable. Le diagnostic gelman.diag est appliqué à une seule variable de la chaîne. Elle est basée sur une comparaison des variances intra-chaîne et inter-chaîne et s'apparente à une analyse classique de la variance. 
+
+
+Il existe en effet deux manières d'estimer la variance de la distribution stationnaire: la moyenne de la variance empirique dans chaque chaîne, et la variance empirique de toutes les chaînes combinées. Si les chaînes ont convergé, les deux estimations sont sans biais. Sinon, la première méthode sous-estimera la variance, car les chaînes individuelles n'ont pas eu le temps de couvrir toute la distribution stationnaire, et la seconde méthode surestime la variance, les points de départ ayant été choisis pour être sur dispersés.
+
+
+
+
+```{r}
+nchains = 3
+chainlist = c(c())
+for(k in 1:nchains){
+    Startpar <-  list(theta = rep(-5 + k * 10/nchains, ncol(Phi)),
+                      alpha = 0.01 + k * 5/nchains,
+                      beta = 0.01 + k * 5/nchains)
+    
+MHchain <-  MH_lm(Phi, target, hyperpar, proposalpar = list(sd_theta = 0.05, sd_alpha=0.01, sd_beta = 0.01),
+      startpar = startpar, Nsim = 10e+3 )
+    chainlist[[k]] <- mcmc(MHchain$statesChain)
+}
+
+chainlist <- mcmc.list(chainlist)
+
+```
+
+
+```{r}
+plot(chainlist)
+```
+
+
+```{r}
+gg <- gelman.diag(chainlist)
+gg
+```
+
+
+La convergence approximative est diagnostiquée lorsque la limite supérieure est proche de 1. Or ici, on peux voir que la majorité des limites supérieures sont loin de 1. D'où la nécessité d'équilibrer la longueur de la chaîne ainsi que les paramètres de la loi de proposition.
+
+On peut également représenter sur une figure l'évolution du facteur de contraction de Gelman et Rubin à mesure que le nombre d'itérations augmente, et ce pour chaque paramètre, et voir si le facteur de contraction a réellement convergé ou s'il fluctue toujours : 
+
+
+```{r}
+gp <- gelman.plot(chainlist)
+```
+
+On peut voir que, pour certains paramètres, le facteur de contraction n'a pas totalement convergé.
+
+
+
+Afin d'optimiser les paramètres de l'algorithme de Metropolis-Hastings, on va s'appuyer sur 3 tests : L'étude de stationnarité, le test de demi-largeur ainsi que le test de convergence de Gelman et Rubin. 
+
+Bien sûr, nous pouvons générer des MCMC plus longues, mais l'autre option consiste à la faire converger plus rapidement. En effet, affecté par le choix de notre fonction de proposition. Deux choses peuvent arriver:
+
+1. La fonction de proposition est étroite par rapport à la distribution que nous avons échantillonnée - taux d'acceptation élevé, mais nous n'avons aucun résultat, mauvais mélange.
+
+2. La fonction de proposition est trop large par rapport à la distribution que nous avons échantillonnée - faible taux d'acceptation, la plupart du temps, nous restons là où nous sommes.
+
+Dans notre cas, nous essayerons d'augmenter les paramètres $(\sigma_{\theta}, \sigma_{\alpha}, \sigma_{\beta})$ et la longueur de la chaîne (par un facteur de 1.5) et lancer le test de heidel pour comparer : 
+
+```{r message=FALSE, warning=FALSE}
+nchains = 10
+chainlist = c(c())
+Nsim = 20e+2
+for(k in 1:nchains){
+    startpar = list(theta = rep(0,ncol(Phi)), alpha = 1, beta = 1)
+    
+    proposalpar <- list(sd_theta = 0.05 + k* 0.05 , sd_alpha=0.01 + k* 0.01, sd_beta = 0.01 + k* 0.01)
+    
+    Nsim = Nsim + 0.5*Nsim
+MHchain <-  MH_lm(Phi, target, hyperpar, proposalpar = list(sd_theta = 0.05, sd_alpha=0.01, sd_beta = 0.01),
+      startpar = startpar, Nsim = Nsim )
+    chainlist[[k]] <- mcmc(MHchain$statesChain)
+}
+
+```
+
+
+```{r}
+hh <- heidel.diag(chainlist[[9]])
+hh
+```
+
+On remarque que pour le choix Nsim = 76886, et $(\sigma_{\theta} = 0.5, \sigma_{\alpha} = 0.1, \sigma_{\beta} = 0.1)$, tous les tests sont réussit à part le Halfwidth mean de la variable $\beta$, avec une durée de "Burn-in" maximale pour cette simulation de 30756 itérations.
+
+Si on lance le test de Gelman, on trouve : 
+
+
+
+```{r}
+nchains = 3
+chainlist = c(c())
+for(k in 1:nchains){
+    Startpar <-  list(theta = rep(-5 + k * 10/nchains, ncol(Phi)),
+                      alpha = 0.01 + k * 5/nchains,
+                      beta = 0.01 + k * 5/nchains)
+    proposalpar <- list(sd_theta = 0.5 , sd_alpha=0.1, sd_beta = 0.1)
+    
+MHchain <-  MH_lm(Phi, target, hyperpar, proposalpar = proposalpar,
+      startpar = startpar, Nsim = 76886 )
+    chainlist[[k]] <- mcmc(MHchain$statesChain)
+}
+
+chainlist <- mcmc.list(chainlist)
+
+```
+
+
+```{r}
+plot(chainlist)
+```
+
+
+```{r}
+gg <- gelman.diag(chainlist)
+gg
+```
+
+On remarque que la convergence est atteinte pour toutes les variables sauf $\alpha$ ici qui conserve une limite supérieure loin de 1.
+
+### <font color='color'> Metropolis-Hastings VS Approche variationnelle </font>
+
+```{r}
+MHchain <-  MH_lm(Phi, target, hyperpar, proposalpar = list(sd_theta = 0.5 , sd_alpha=0.1, sd_beta = 0.1),
+      startpar = list(theta = rep(0,ncol(Phi)), alpha = 1, beta = 1), Nsim = 76886 )
+```
+
+```{r}
+summary(mcmc(MHchain$statesChain))
+```
+
+| Approche variationnelle               |     Metropolis-Hastings     | 
+| :-------------------------------------|  -------------------------: |
+| $\mathrm{E}_{q^*}[\alpha] = 0.1751109$| $\alpha_{moyenne} =  0.1352$| 
+| $\mathrm{E}_{q^*}[\beta] = 0.1157912$ | $\beta_{moyenne} =  0.1208$ |      
+
+
+
+Ensuite, on trace sur le même graphique le vrai vecteur $\theta_0$ en noir, chaque élément de $\theta$ dans l'approche de Metropolis-Hastings en rouge, l'estimation par le modèle variationnelle en vert ainsi que leurs intervalles de crédibilité a posteriori à 95%:
+
+```{r}
+summ = summary(mcmc(MHchain$statesChain))
+theta_chap = summ$statistics[c(1:5),1]
+
+Iplus1 <- summ$quantiles[c(1:5),5]
+Iminus1 <- summ$quantiles[c(1:5),1]
+
+plot(1:5, theta0, pch=19,col='black',  ylim= range(Iminus1-1, Iplus1+1, Beta0),ylab = 'Theta', main = 'Metropolis-Hastings VS Approximation variationnelle')
+points(theta_chap, col='red')
+arrows( x0 = 1:5, y0 = Iminus1, 
+        y1 = Iplus1 ,code=3, length=0.1, col="red")
+
+
+Iplus2 <- res$varpar$`m_n` + 1.96*sqrt(diag(res$varpar$S_n))
+Iminus2 <- res$varpar$`m_n` - + 1.96*sqrt(diag(res$varpar$S_n))
+
+
+points(res$varpar$`m_n`, col='green')
+arrows( x0 = 1:5, y0 = Iminus2, 
+        y1 = Iplus2 ,code=3, length=0.1, col="green")
+```
+
+
+
+## <font color='color'> 3.2  Algorithme de Gibbs </font>
+
+Afin d'implémenter l'algorithme de Gibbs, il est nécessaire d'évaluer les lois conditionnelles $p(\theta|y,\alpha, \beta)$, $p(\alpha|y,\theta, \beta)$ et $p(\beta|y,\alpha, \theta)$. On commence alors par déterminer leurs expressions :
+
+
+**1. Calcul de $p(\theta|y,\alpha, \beta)$ :**
+
+\begin{align}
+p(\theta|y,\alpha, \beta) &= \frac{p(y|\theta,\alpha, \beta)}{p(y,\alpha, \beta)}p(\theta,\alpha, \beta)\\
+                          &\propto  p(y|\theta,\alpha, \beta) p(\theta|\beta) p(\alpha) p(\beta)\\
+                          &\propto p(y|\theta,\alpha, \beta) p(\theta|\beta)\\
+                          &\propto \mathcal{N}(y; \Phi \theta, \beta^{-1} I_n\,) \mathcal{N}(\theta; 0, \alpha^{-1} I_p\,)
+
+\end{align}
+
+Le même calcul faits en question 2.1 aboutissant aux équations de champ moyen donne : 
+
+$p(\theta|y,\alpha, \beta) \propto \mathcal{N}(\theta; \tilde{m_n}, \tilde{S_n}\,)$, avec :
+
+
+* $\tilde{m_n} = \beta \tilde{S_n} \phi^T y$
+
+* $\tilde{S_n} = (\alpha I_p + \beta \phi^T \phi)^{-1}$
+
+
+
+**2. Calcul de $p(\beta|y,\alpha, \theta)$ :** De même, on a
+
+\begin{align}
+p(\beta|y,\alpha, \theta) &\propto p(y|\theta,\alpha, \beta) p(\beta)\\
+                          &\propto \mathcal{N}(y; \Phi \theta, \beta^{-1} I_n\,) \mathcal{Gamma}(\beta; b_0,\,\tau_0)\,
+                           
+
+\end{align}
+
+Le même calcul faits en question 2.1 aboutissant aux équations de champ moyen donne : 
+
+$p(\beta|y,\alpha, \theta) = \mathcal{Gamma}(\alpha; b_n,\,\tau_n)\,$, avec :
+
+
+* $b_n = b_0 + \frac{n}{2}$
+* $\tau_n = \tau_0 + \frac{1}{2}||y - \phi\theta||^2$
+
+
+
+**3. Calcul de $p(\alpha|y,\beta, \theta)$ :** De même, on a
+
+\begin{align}
+p(\alpha|y,\beta, \theta) &\propto p(y|\theta,\alpha, \beta) p(\alpha)\\
+                          &\propto \mathcal{N}(y; \Phi \theta, \beta^{-1} I_n\,) \mathcal{Gamma}(\alpha; a_0,\,\lambda_0)\,
+                           
+
+\end{align}
+
+Le même calcul faits en question 2.1 aboutissant aux équations de champ moyen donne : 
+
+$p(\alpha|y,\theta, \beta) = \mathcal{Gamma}(\alpha; a_n,\,\lambda_n)\,$, avec :
+
+
+* $a_n = a_0 + \frac{p}{2}$
+* $\lambda_n = \lambda_0 + \frac{1}{2}||\theta||^2$
+
+
+#### <font color='color'> Algorithme de Gibbs </font>
+
+```{r}
+eval_sn <- function(alpha, beta, Phi){
+      p = ncol(Phi)
+      S_n_inv <- alpha * diag(p) + beta * t(Phi)%*%Phi
+      S_n <-  solve(S_n_inv)
+      return(S_n)
+}
+eval_mn <- function(beta, S_n, Phi, target){
+      m_n <-  beta * S_n %*% t(Phi) %*% target
+      return(m_n)
+}
+eval_tau_n <- function(theta, Phi, target, tau_0){
+      tau_n <- tau_0 + 1/2 * ( sum( ( target - Phi %*% theta)^2 ))
+      return(tau_n)
+}
+
+eval_lambda_n <- function(theta, lambda_0){
+      lambda_n <- lambda_0 + 1/2 * (sum(theta^2)) 
+      return(lambda_n)
+    }
+```
+
+
+
+```{r}
+gibbs_lm <- function(Phi, target, hyperpar,
+                     startpar = list(theta = rep(0,ncol(Phi)), alpha = 1, beta = 1),
+                     Nsim = 10e+3 )
+    ## ARGUMENTS: 
+    ## Phi: design matrix (feature map applied to data): a n*p matrix
+    ## target: a  vector of size n: the observed values y.
+    ## hyperpar: a list of hyperparameters containing entries a_0, lambda_0, b_0, tau_0:
+    ##          hyper-prior gamma parameters respectively for alpha and beta
+    ## startpar: the starting value for the chain: a list with entries theta, alpha, beta.
+    ## Nsim: the desired length for the markov chain (number of MCMC interations)
+    ##
+    ## RETURNS: a list with entries :
+    ## statesChain:  a matrix of dimension Nsim* (p+2): each row contains the current
+    ##               state (concatenation of the vector theta, alpha, beta)
+    ## lastpar: the latest state: a list with entries (theta, alpha, beta)
+##
+{
+    n <- nrow(Phi)
+    p <- ncol(Phi)
+    statesChain <- matrix(nrow=Nsim, ncol = p +2 )
+    currentpar <- startpar
+    an <-  hyperpar$a_0 + p/2
+    bn <-  hyperpar$b_0 + n/2
+    
+    for (i in 1:Nsim){
+    
+    S_n = eval_sn(currentpar$alpha, currentpar$beta, Phi)
+    m_n = eval_mn(currentpar$beta, S_n, Phi, target)
+    currentpar$theta <- rmvnorm(1,mean = m_n, sigma=S_n)
+
+    lambda_n = eval_lambda_n(currentpar$theta, hyperpar$lambda_0)
+    currentpar$alpha <- rgamma(1, shape = an, rate = lambda_n)
+    
+    S_n = eval_sn(currentpar$alpha, currentpar$beta, Phi)
+    m_n = eval_mn(currentpar$beta, S_n, Phi, target)
+    inter_theta = rmvnorm(1,mean = m_n, sigma=S_n)
+    
+    tau_n = eval_tau_n(t(inter_theta), Phi, target, hyperpar$tau_0)
+    currentpar$beta <- rgamma(1, shape = bn, rate = tau_n)
+    
+    
+    statesChain[i,] <- c(currentpar$theta, currentpar$alpha, currentpar$beta)
+    
+    }
+    return(list( statesChain = statesChain, lastpar = currentpar ))
+}
+```
+
+
+### <font color='color'> Test sur un jeu de données simulé </font>
+
+Nous simulons, comme dans la question 2.3, un jeu de données de taille n = 100
+
+
+```{r}
+Fmap <- function(x){c(1, x,x^2,x^3, x^4)}
+N <- 100
+Beta0 <- 0.1
+theta0 <- c(5, 2, 1, -1, 1)
+set.seed(3) 
+data <- matrix(runif(N, min=-3, max = 3),ncol=1)
+h0 <- function(x){ sum(Fmap(x)* theta0)}
+
+target <-  sapply(data,h0) + rnorm(N, sd = sqrt(Beta0)^(-1))
+hyperpar <- list(a_0 = 0.1, lambda_0 = 0.1,
+                 b_0 = 0.1, tau_0 = 0.1)
+Phi <-  t(apply(X= data, MARGIN=1, FUN = Fmap))
+hyperpar <- list(a_0 = 0.1, lambda_0 = 0.1,
+                 b_0 = 0.1, tau_0 = 0.1)
+```
+
+
+```{r}
+gibbs_fit = gibbs_lm (Phi, target, hyperpar,startpar = list(theta = rep(0,ncol(Phi)), alpha = 1, beta = 1), Nsim = 20e+3 )
+gibbs_fit$lastpar
+```
+
+
+### <font color='color'> Allure des chaines </font>
+
+On visualise l'allure des chaines au cours des itérations ainsi que les densités obtenues : 
+
+```{r}
+plot(mcmc(gibbs_fit$statesChain))
+```
+
+On reconnait ainsi les allures des densités de $\alpha, \beta$, et $\theta$. L'absence de l'étape de rejet est la raison des allures de ces traces. On converge donc vers une loi! 
+
+#### Test heidel.diag
+
+
+
+```{r}
+hh <- heidel.diag(gibbs_fit$statesChain, pvalue = 0.05)
+hh
+```
+
+On remarque que pour Nsim = 20000, tous les tests sont réussis.
+
+
+### <font color='color'> Gubbs VS Approche variationnelle </font>
+
+
+
+```{r}
+summary(mcmc(gibbs_fit$statesChain))
+```
+
+
+
+| Approche variationnelle               |     Gibbs     | 
+| :-------------------------------------|  -------------------------: |
+| $\mathrm{E}_{q^*}[\alpha] = 0.1751109$| $\alpha_{moyenne} =  0.1832$| 
+| $\mathrm{E}_{q^*}[\beta] = 0.1157912$ | $\beta_{moyenne} =  0.1156$ |      
+
+
+Ensuite, on trace sur le même graphique le vrai vecteur $\theta_0$ en noir, chaque élément de $\theta$ dans l'approche de Gibbs en rouge, l'estimation par le modèle variationnelle en vert ainsi que leurs intervalles de crédibilité a posteriori à 95%:
+
+```{r}
+summ = summary(mcmc(gibbs_fit$statesChain))
+theta_chap = summ$statistics[c(1:5),1]
+
+Iplus1 <- summ$quantiles[c(1:5),5]
+Iminus1 <- summ$quantiles[c(1:5),1]
+
+plot(1:5, theta0, pch=19,col='black',  ylim= range(Iminus1-1, Iplus1+1, Beta0),ylab = 'Theta', main = 'Metropolis-Hastings VS Approximation variationnelle')
+points(theta_chap, col='red')
+arrows( x0 = 1:5, y0 = Iminus1, 
+        y1 = Iplus1 ,code=3, length=0.1, col="red")
+
+
+Iplus2 <- res$varpar$`m_n` + 1.96*sqrt(diag(res$varpar$S_n))
+Iminus2 <- res$varpar$`m_n` - + 1.96*sqrt(diag(res$varpar$S_n))
+
+
+points(res$varpar$`m_n`, col='green')
+arrows( x0 = 1:5, y0 = Iminus2, 
+        y1 = Iplus2 ,code=3, length=0.1, col="green")
+```
+
+On remarque que les estimations et les intervalles sont presque confondus.
+
+
+### <font color='color'> Convergence des chaînes </font>
+
+Pour comparer la convergence, on applique maintenant le test de Gelman : 
+
+
+```{r}
+nchains = 3
+chainlist = c(c())
+for(k in 1:nchains){
+    Startpar <-  list(theta = rep(-5 + k * 10/nchains, ncol(Phi)),
+                      alpha = 0.01 + k * 5/nchains,
+                      beta = 0.01 + k * 5/nchains)
+    
+Gibbschain <- gibbs_lm (Phi, target, hyperpar,startpar = Startpar, Nsim = 20e+3 )
+    chainlist[[k]] <- mcmc(Gibbschain$statesChain)
+}
+
+```
+
+
+```{r}
+plot(mcmc.list(chainlist))
+```
+
+
+```{r}
+gg <- gelman.diag(chainlist)
+gg
+```
+
+On peut voir que la limite supérieur est égale à 1 pour toutes les variables. Contrairement à l'algorithme Metropolis-Hastings, On a bien donc convergence de toutes les chaînes. Le temps d'exécution et lui aussi plus faible que celui de Metropolis.
